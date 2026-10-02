@@ -50,6 +50,12 @@ target_link_libraries(axrb-host-bridge
 )
 
 if(UNIX AND NOT APPLE)
+  include("${PROJECT_SOURCE_DIR}/cmake/AxrbLinuxVulkanHeaders.cmake")
+  axrb_linux_vulkan_headers(_axrb_vulkan_headers)
+  target_sources(axrb-host-bridge PRIVATE linux_vulkan.cpp presentation_linux.cpp)
+  target_include_directories(axrb-host-bridge PRIVATE "${_axrb_vulkan_headers}")
+  # libvulkan.so.1 is loaded at runtime; no Vulkan development package needed.
+  target_compile_definitions(axrb-host-bridge PRIVATE XR_USE_GRAPHICS_API_VULKAN XR_USE_TIMESPEC VK_NO_PROTOTYPES)
   target_link_libraries(axrb-host-bridge PRIVATE dl)
 endif()
 

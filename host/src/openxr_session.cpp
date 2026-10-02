@@ -79,6 +79,8 @@ OpenXrSession::~OpenXrSession()
         destroySwapchain_(projectionSwapchain_);
         projectionSwapchain_ = XR_NULL_HANDLE;
     }
+#else
+    for (auto& layer : layerSwapchains_) if (layer.swapchain && destroySwapchain_) destroySwapchain_(layer.swapchain);
 #endif
     for (XrSpace& handSpace : handSpaces_) {
         if (handSpace != XR_NULL_HANDLE && destroySpace_ != nullptr) {
@@ -123,6 +125,7 @@ bool OpenXrSession::initialize(const std::string& gameName)
         XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME,
 #endif
     };
+    [[maybe_unused]] bool vulkanAvailable = false;
     PFN_xrVoidFunction enumerateRaw = nullptr;
     loader_.getInstanceProcAddr(XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties", &enumerateRaw);
     if (enumerateRaw) {
@@ -134,6 +137,10 @@ bool OpenXrSession::initialize(const std::string& gameName)
 #if defined(_WIN32)
                 if (std::strcmp(ext.extensionName, XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME) == 0) performanceCounterTimeEnabled_ = true;
 #endif
+#if !defined(_WIN32)
+                if (std::strcmp(ext.extensionName, XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME) == 0) vulkanAvailable = true;
+                if (std::strcmp(ext.extensionName, XR_KHR_COMPOSITION_LAYER_COLOR_SCALE_BIAS_EXTENSION_NAME) == 0) colorScaleBiasEnabled_ = true;
+#endif
                 if (std::strcmp(ext.extensionName, XR_KHR_COMPOSITION_LAYER_EQUIRECT2_EXTENSION_NAME) == 0) equirectEnabled_ = true;
                 if (std::strcmp(ext.extensionName, XR_EXT_HAND_TRACKING_EXTENSION_NAME) == 0) handTrackingEnabled_ = true;
                 if (std::strcmp(ext.extensionName, XR_EXT_HAND_TRACKING_DATA_SOURCE_EXTENSION_NAME) == 0) handDataSourceEnabled_ = true;
@@ -141,6 +148,15 @@ bool OpenXrSession::initialize(const std::string& gameName)
         }
     }
     if (equirectEnabled_) extensions.push_back(XR_KHR_COMPOSITION_LAYER_EQUIRECT2_EXTENSION_NAME);
+#if !defined(_WIN32)
+    const char* headless = std::getenv("AXRB_HEADLESS");
+    vulkanPresentation_ = vulkanAvailable && !(headless && headless[0] == '1');
+    if (vulkanPresentation_) extensions[0] = XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME;
+    colorScaleBiasEnabled_ = colorScaleBiasEnabled_ && vulkanPresentation_;
+    if (colorScaleBiasEnabled_) extensions.push_back(XR_KHR_COMPOSITION_LAYER_COLOR_SCALE_BIAS_EXTENSION_NAME);
+    std::fprintf(stderr, "AXRB OpenXR: Linux presentation=%s\n", vulkanPresentation_ ? "Vulkan (XR_KHR_vulkan_enable2)" :
+        vulkanAvailable ? "headless (AXRB_HEADLESS=1)" : "headless (runtime lacks XR_KHR_vulkan_enable2)");
+#endif
 #if defined(_WIN32)
     if (performanceCounterTimeEnabled_) extensions.push_back(XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME);
     if (const char* value = std::getenv("AXRB_FRESH_FRAME_WAIT_US")) {
@@ -180,12 +196,7 @@ bool OpenXrSession::initialize(const std::string& gameName)
             "AXRB OpenXR: xrCreateInstance failed: %s (%d). Required extension: %s\n",
             xr_result_name(result),
             result,
-#if defined(_WIN32)
-            XR_KHR_D3D11_ENABLE_EXTENSION_NAME
-#else
-            XR_MND_HEADLESS_EXTENSION_NAME
-#endif
-        );
+            extensions[0]);
         return false;
     }
 
@@ -232,10 +243,21 @@ bool OpenXrSession::initialize(const std::string& gameName)
     graphicsBinding.device = d3dDevice_.get();
 #endif
 
+#if !defined(_WIN32)
+    if (vulkanPresentation_) {
+        vulkan_ = std::make_unique<LinuxVulkan>();
+        if (!vulkan_->create(instance_, systemId_, loader_.getInstanceProcAddr)) {
+            std::fprintf(stderr, "AXRB OpenXR: could not create the Vulkan device the runtime requires\n");
+            return false;
+        }
+    }
+#endif
     XrSessionCreateInfo sessionInfo{XR_TYPE_SESSION_CREATE_INFO};
     sessionInfo.systemId = systemId_;
 #if defined(_WIN32)
     sessionInfo.next = &graphicsBinding;
+#else
+    if (vulkan_) sessionInfo.next = vulkan_->binding();
 #endif
     result = createSession_(instance_, &sessionInfo, &session_);
     if (result != XR_SUCCESS) {
@@ -257,19 +279,13 @@ bool OpenXrSession::initialize(const std::string& gameName)
 #if defined(_WIN32)
     std::fprintf(stderr, "AXRB GPU: frame handoff=%s\n", concurrentGpuFrames_ ? "overlapping (experimental)" : "serialized");
     if (!create_projection_swapchain()) return false;
+#else
+    if (vulkanPresentation_ && !create_projection_swapchain()) return false;
 #endif
     initialize_controller_actions();
     initialize_hand_tracking();
 
-    std::fprintf(
-        stderr,
-        "AXRB OpenXR: host tracking source initialized with %s\n",
-#if defined(_WIN32)
-        XR_KHR_D3D11_ENABLE_EXTENSION_NAME
-#else
-        XR_MND_HEADLESS_EXTENSION_NAME
-#endif
-    );
+    std::fprintf(stderr, "AXRB OpenXR: host tracking source initialized with %s\n", extensions[0]);
     return true;
 }
 
@@ -340,6 +356,13 @@ bool OpenXrSession::load_instance_functions()
 #endif
 #if !defined(_WIN32)
         && load_func("xrConvertTimespecTimeToTimeKHR", &convertTimespecTimeToTime_)
+        && (!vulkanPresentation_ || (load_func("xrEnumerateSwapchainFormats", &enumerateSwapchainFormats_)
+            && load_func("xrCreateSwapchain", &createSwapchain_)
+            && load_func("xrDestroySwapchain", &destroySwapchain_)
+            && load_func("xrEnumerateSwapchainImages", &enumerateSwapchainImages_)
+            && load_func("xrAcquireSwapchainImage", &acquireSwapchainImage_)
+            && load_func("xrWaitSwapchainImage", &waitSwapchainImage_)
+            && load_func("xrReleaseSwapchainImage", &releaseSwapchainImage_)))
 #endif
         ;
 }

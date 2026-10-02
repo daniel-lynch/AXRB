@@ -19,3 +19,6 @@ struct GpuFrameBatch {
 };
 }
 #endif
+#if !defined(_WIN32)
+#include "linux_vulkan.h" // defines GpuFrameBatch for Linux
+#endif

@@ -108,9 +108,43 @@ bool OpenXrSession::receive_image(const axrb::protocol::ImageFrameHeader& header
     }
     pendingGpuFrame_.reset(); pendingMixedCount_ = 0;
 #else
-    if (axrb::protocol::mixed_gpu_version(header.version) ||
-        header.version == axrb::protocol::kWindowsGpuFrameVersion ||
-        axrb::protocol::equirect_gpu_version(header.version) || header.version == axrb::protocol::kQuadGpuFrameVersion) return false;
+    using namespace axrb::protocol;
+    const bool singleGpu = header.version == kWindowsGpuFrameVersion || header.version == kQuadGpuFrameVersion ||
+        header.version == kEquirectGpuFrameVersion;
+    if (singleGpu || header.version == kGpuBatchFrameVersion) {
+        // Layers exported by the emulator's Vulkan layer. ACK (return true)
+        // only after every host-owned copy has completed.
+        std::vector<GpuBatchPart> parts;
+        if (singleGpu) {
+            if (pixels.size() != sizeof(WindowsGpuFrame)) return false;
+            GpuBatchPart part{header, projection, {}};
+            std::memcpy(&part.gpu, pixels.data(), sizeof(part.gpu));
+            parts.push_back(part);
+        } else {
+            if (!valid_gpu_batch(header, pixels.data(), pixels.size())) return false;
+            for (uint32_t i = 0; i < header.reserved; ++i)
+                parts.push_back(decode_gpu_batch_part(pixels.data(), pixels.size() / header.reserved, i));
+        }
+        if (!vulkan_) return false;
+        for (const auto& part : parts)
+            if (part.header.width > projectionWidth_ || part.header.height > projectionHeight_) return false;
+        auto frame = vulkan_->receive(parts);
+        if (!frame) return false;
+        if (!reportedGpuImage_) {
+            std::fprintf(stderr, "AXRB GPU: shared eye images active (Vulkan OPAQUE_FD); no pixel TCP transfer\n");
+            reportedGpuImage_ = true;
+        }
+        imageFrame_->store(header, std::move(pixels), projection, std::move(frame));
+        return true;
+    }
+    if (mixed_gpu_version(header.version)) {
+        static bool reported = false;
+        if (!reported) {
+            std::fprintf(stderr, "AXRB GPU: per-part mixed GPU frames (version %u) are not implemented on Linux; the guest sends whole-frame batches\n", header.version);
+            reported = true;
+        }
+        return false;
+    }
 #endif
     // CPU-transfer fallback uses the same layer-local fade semantics.
     const size_t eyeBytes=static_cast<size_t>(header.width)*header.height*4;

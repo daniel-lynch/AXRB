@@ -40,7 +40,11 @@
 #include <vector>
 
 #if !defined(_WIN32)
+#ifndef XR_USE_TIMESPEC
 #define XR_USE_TIMESPEC
+#endif
+// Built with XR_USE_GRAPHICS_API_VULKAN and VK_NO_PROTOTYPES (CMake).
+#include <vulkan/vulkan.h>
 #else
 #define XR_USE_GRAPHICS_API_D3D11
 #ifndef XR_USE_PLATFORM_WIN32
@@ -419,6 +423,10 @@ private:
     bool upload_android_frame(ID3D11Texture2D* texture, uint32_t imageIndex,
         const HostImageSnapshot& frame, bool precompose,
         const XrPosef* overflowWorldFromView);
+#else
+    // presentation_linux.cpp: Vulkan presentation (XR_KHR_vulkan_enable2).
+    bool create_projection_swapchain();
+    bool update_projection_layers(XrTime displayTime, std::vector<const XrCompositionLayerBaseHeader*>& layers);
 #endif
 
     bool create_reference_space(XrReferenceSpaceType type, XrSpace* space);
@@ -613,6 +621,39 @@ private:
 #endif
 #if !defined(_WIN32)
     PFN_xrConvertTimespecTimeToTimeKHR convertTimespecTimeToTime_ = nullptr;
+    // Without XR_KHR_vulkan_enable2 (or with AXRB_HEADLESS=1) the bridge
+    // stays a pose-only XR_MND_headless client, as before.
+    bool vulkanPresentation_ = false;
+    std::unique_ptr<LinuxVulkan> vulkan_;
+    PFN_xrEnumerateSwapchainFormats enumerateSwapchainFormats_ = nullptr;
+    PFN_xrCreateSwapchain createSwapchain_ = nullptr;
+    PFN_xrDestroySwapchain destroySwapchain_ = nullptr;
+    PFN_xrEnumerateSwapchainImages enumerateSwapchainImages_ = nullptr;
+    PFN_xrAcquireSwapchainImage acquireSwapchainImage_ = nullptr;
+    PFN_xrWaitSwapchainImage waitSwapchainImage_ = nullptr;
+    PFN_xrReleaseSwapchainImage releaseSwapchainImage_ = nullptr;
+    // One two-slice swapchain per application layer, in submission order.
+    struct LayerSwapchain {
+        XrSwapchain swapchain = XR_NULL_HANDLE;
+        std::vector<XrSwapchainImageVulkan2KHR> images;
+        std::vector<uint64_t> uploadedSequence;
+    };
+    struct LayerStorage {
+        std::array<XrCompositionLayerProjectionView, 2> views{};
+        XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        std::array<XrCompositionLayerQuad, 2> quads{};
+        XrCompositionLayerEquirect2KHR sphere{XR_TYPE_COMPOSITION_LAYER_EQUIRECT2_KHR};
+        std::array<XrCompositionLayerColorScaleBiasKHR, 2> colors{};
+    };
+    bool ensure_layer_swapchains(size_t count);
+    std::vector<LayerSwapchain> layerSwapchains_;
+    std::vector<LayerStorage> layerStorage_;
+    bool colorScaleBiasEnabled_ = false;
+    int64_t projectionFormat_ = 0;
+    uint32_t projectionWidth_ = 0, projectionHeight_ = 0;
+    uint64_t submittedSequence_ = 0;
+    FrameDeliveryCounter submittedGameFrames_;
+    bool reportedProjectionSubmit_ = false, reportedUnsupportedLayer_ = false, reportedGpuImage_ = false;
 #endif
 };
 

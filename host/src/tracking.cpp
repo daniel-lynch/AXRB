@@ -49,6 +49,11 @@ axrb::protocol::PoseFrame OpenXrSession::make_frame(uint64_t sequence)
 #if defined(_WIN32)
     frame.render_width = projectionWidth_;
     frame.render_height = projectionHeight_;
+#else
+    if (vulkanPresentation_) {
+        frame.render_width = projectionWidth_;
+        frame.render_height = projectionHeight_;
+    }
 #endif
 
     if (!sessionRunning_) {
@@ -246,7 +251,9 @@ axrb::protocol::PoseFrame OpenXrSession::make_frame(uint64_t sequence)
         if (shouldRender && update_fps_hud(fpsHud, static_cast<uint32_t>(layers.size())))
             layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader*>(&fpsHud));
 #else
-        const std::vector<const XrCompositionLayerBaseHeader*> layers;
+        std::vector<const XrCompositionLayerBaseHeader*> layers;
+        layers.reserve(1);
+        const bool hasGameProjection = vulkanPresentation_ && shouldRender && update_projection_layers(locateTime, layers);
 #endif
         const uint32_t layerCount = static_cast<uint32_t>(layers.size());
 
@@ -264,6 +271,20 @@ axrb::protocol::PoseFrame OpenXrSession::make_frame(uint64_t sequence)
             std::fprintf(stderr, "AXRB OpenXR: xrEndFrame failed: %s (%d)\n", xr_result_name(result), result);
             useFrameLoop_ = false;
         }
+#if !defined(_WIN32)
+        if (result == XR_SUCCESS && hasGameProjection) {
+            if (submittedGameFrames_.record(submittedSequence_)) {
+                static axrb::protocol::FrameIntervals freshStats("host-fresh-submit");
+                freshStats.record();
+            }
+            if (submittedGameFrames_.total % 900 == 0)
+                std::fprintf(stderr, "AXRB Submitted: unique=%llu repeats=%llu total=%llu sequence=%llu\n",
+                    static_cast<unsigned long long>(submittedGameFrames_.unique),
+                    static_cast<unsigned long long>(submittedGameFrames_.repeated),
+                    static_cast<unsigned long long>(submittedGameFrames_.total),
+                    static_cast<unsigned long long>(submittedSequence_));
+        }
+#endif
 #if defined(_WIN32)
 #if defined(AXRB_ENABLE_PERFORMANCE_OVERLAY)
         if (imageFrame_) imageFrame_->performance.submitted(
