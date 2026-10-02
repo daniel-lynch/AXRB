@@ -1,5 +1,6 @@
 """Apply emulator configuration without opening or rewriting application files."""
 import argparse
+import os
 import json
 import hashlib
 from pathlib import Path
@@ -41,7 +42,7 @@ def main():
     import re
     if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+', args.package):
         parser.error('Invalid Android package')
-    adb = [str(args.sdk / 'platform-tools/adb.exe'), '-s', args.serial]
+    adb = [str(args.sdk / ('platform-tools/adb.exe' if os.name == 'nt' else 'platform-tools/adb')), '-s', args.serial]
     def run(*parts):
         try:
             return subprocess.run([*adb, *parts], check=True, capture_output=True,

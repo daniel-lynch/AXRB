@@ -111,7 +111,7 @@ def run(argv, timeout=30):
 def apply(args):
     if not re.fullmatch(r'[a-zA-Z0-9_.]+', args.package):
         raise ValueError('Invalid package')
-    adb = [args.sdk / 'platform-tools/adb.exe', '-s', args.serial]
+    adb = [args.sdk / ('platform-tools/adb.exe' if os.name == 'nt' else 'platform-tools/adb'), '-s', args.serial]
     def shell(command):
         return run(adb + ['shell', command])
     def root(command):

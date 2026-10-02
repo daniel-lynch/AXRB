@@ -17,13 +17,14 @@ def bundled_library(root, relative):
 
 
 def ndk_compiler(sdk, *, cxx=False):
-    driver = 'x86_64-linux-android29-clang' + ('++' if cxx else '') + '.cmd'
-    toolchain = Path('toolchains/llvm/prebuilt/windows-x86_64/bin')
+    windows = os.name == 'nt'
+    driver = 'x86_64-linux-android29-clang' + ('++' if cxx else '') + ('.cmd' if windows else '')
+    toolchain = Path('toolchains/llvm/prebuilt/' + ('windows-x86_64' if windows else 'linux-x86_64') + '/bin')
     override = os.environ.get('ANDROID_NDK_HOME')
     if override:
         compiler = Path(override) / toolchain / driver
         if not compiler.is_file():
-            raise RuntimeError(f'ANDROID_NDK_HOME does not contain the required Windows NDK compiler: {compiler}')
+            raise RuntimeError(f'ANDROID_NDK_HOME does not contain the required NDK compiler: {compiler}')
         return compiler
 
     # The launcher SDK contains the emulator, not necessarily development tools.
