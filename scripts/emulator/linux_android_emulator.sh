@@ -8,8 +8,10 @@
 # console 5584 / adb 5585, private adb server on 5038, 4 vCPUs, 8 GB RAM,
 # system-images;android-36;google_apis;x86_64 (r07, ships libndk_translation).
 # What it does NOT do: the WHPX clock hook (host/clock is Windows-only; KVM
-# has a stable kvm-clock, see docs), the multicore CPUID-patched backend
-# (Windows-only workaround), or the Vulkan gpu-share layer.
+# has a stable kvm-clock, see docs) or the multicore CPUID-patched backend
+# (Windows-only workaround). AXRB_GPU_SHARING=1 loads the Linux build of the
+# host/gpu Vulkan layer (cmake -S host/gpu -B out/linux-gpu) into the emulator;
+# it serves eye images as OPAQUE_FD memory to axrb-host-bridge.
 set -euo pipefail
 
 SDK="${ANDROID_HOME:-$HOME/Android/Sdk}"
@@ -21,6 +23,7 @@ MEMORY_MB="${AXRB_MEMORY_MB:-8192}"
 STORAGE_GB="${AXRB_STORAGE_GB:-32}"
 TRANSPORT="${AXRB_GL_TRANSPORT:-asg}"
 GPU_SHARING="${AXRB_GPU_SHARING:-0}"
+GPU_LAYER_DIR="${AXRB_GPU_LAYER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)/out/linux-gpu}"
 LOGS="${AXRB_LOGS:-${XDG_STATE_HOME:-$HOME/.local/state}/axrb/logs/emulator}"
 IMAGE_PKG="system-images;android-36;google_apis;x86_64"
 IMAGE_DIR="$SDK/system-images/android-36/google_apis/x86_64"
@@ -113,8 +116,14 @@ start() {
         -memory "$MEMORY_MB" -cores "$CORES" -writable-system)
     [[ "${AXRB_SHOW_WINDOW:-0}" == 1 ]] || args+=(-no-window)
     [[ "${AXRB_COLD_BOOT:-0}" == 1 ]] && args+=(-no-snapshot-load)
-    echo "Starting: $EMULATOR ${args[*]}"
-    nohup "$EMULATOR" "${args[@]}" >"$LOGS/emulator.stdout.log" 2>"$LOGS/emulator.stderr.log" &
+    local layer_env=()
+    if [[ "$GPU_SHARING" == 1 ]]; then
+        [[ -f "$GPU_LAYER_DIR/axrb_gpu_layer.json" ]] || { echo "Build host/gpu first: cmake -S host/gpu -B out/linux-gpu && cmake --build out/linux-gpu" >&2; exit 1; }
+        # Scoped to the emulator process; nothing is registered system-wide.
+        layer_env=(env VK_LAYER_PATH="$GPU_LAYER_DIR" VK_INSTANCE_LAYERS=VK_LAYER_AXRB_gpu_share)
+    fi
+    echo "Starting: ${layer_env[*]} $EMULATOR ${args[*]}"
+    nohup "${layer_env[@]}" "$EMULATOR" "${args[@]}" >"$LOGS/emulator.stdout.log" 2>"$LOGS/emulator.stderr.log" &
     echo "emulator pid $!"
     wait_boot 480 || { echo "Android did not boot; see $LOGS" >&2; exit 1; }
     verify || true
@@ -132,7 +141,7 @@ start() {
 verify() {
     mkdir -p "$LOGS"
     adbs shell dumpsys SurfaceFlinger | grep '^GLES:' | tee "$LOGS/guest-gles.txt"
-    adbs shell cmd gpu vkjson >"$LOGS/guest-vulkan.json"
+    timeout 20 "$ADB" -s "$SERIAL" shell cmd gpu vkjson >"$LOGS/guest-vulkan.json" || true  # can hang after a snapshot load
     python3 - "$LOGS/guest-vulkan.json" <<'PY'
 import json, sys
 for d in json.load(open(sys.argv[1])).get('devices', []):

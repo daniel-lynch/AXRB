@@ -1,6 +1,18 @@
 cmake_minimum_required(VERSION 3.22)
 project(axrb_windows_gpu_layer LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
+if(NOT WIN32)
+  # Linux: only the emulator-side layer, exporting eye images as OPAQUE_FD
+  # memory for axrb-host-bridge (docs/linux_spike.md).
+  include("${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/AxrbLinuxVulkanHeaders.cmake")
+  axrb_linux_vulkan_headers(AXRB_VULKAN_HEADERS)
+  add_library(axrb_gpu_layer SHARED layer.cpp)
+  target_include_directories(axrb_gpu_layer PRIVATE "${AXRB_VULKAN_HEADERS}" ../../protocol)
+  target_compile_definitions(axrb_gpu_layer PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(axrb_gpu_layer PRIVATE pthread)
+  file(GENERATE OUTPUT "$<TARGET_FILE_DIR:axrb_gpu_layer>/axrb_gpu_layer.json" CONTENT "{\n\"file_format_version\":\"1.2.0\",\n\"layer\":{\"name\":\"VK_LAYER_AXRB_gpu_share\",\"type\":\"GLOBAL\",\"library_path\":\"$<TARGET_FILE:axrb_gpu_layer>\",\"api_version\":\"1.3.0\",\"implementation_version\":\"1\",\"description\":\"AXRB shared eye images (Linux OPAQUE_FD)\"}}\n")
+  return()
+endif()
 add_executable(axrb_capture_shared capture_shared.cpp)
 target_link_libraries(axrb_capture_shared PRIVATE d3d11 dxgi)
 set(AXRB_VULKAN_HEADERS "" CACHE PATH "Optional Vulkan headers directory")

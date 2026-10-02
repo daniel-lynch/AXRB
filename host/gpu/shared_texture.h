@@ -1,4 +1,7 @@
 #pragma once
+#if !defined(_WIN32)
+#include "shared_texture_fd.h"
+#else
 #include <windows.h>
 #include <d3d11_1.h>
 #include <dxgi1_2.h>
@@ -110,3 +113,4 @@ struct SharedDevice {
     }
 };
 }
+#endif

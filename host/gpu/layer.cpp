@@ -7,6 +7,20 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <cstdio>
+#include <cstring>
+#if !defined(_WIN32)
+#include "linux_gpu_share.h"
+#include <thread>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+#define AXRB_LAYER_EXPORT __attribute__((visibility("default")))
+#define AXRB_LAYER_ENTRY AXRB_LAYER_EXPORT
+#else
+#define AXRB_LAYER_EXPORT __declspec(dllexport)
+#define AXRB_LAYER_ENTRY // exported by layer.def
+#endif
 
 using axrb::protocol::WindowsGpuMarker;
 namespace {
@@ -27,11 +41,81 @@ std::unordered_map<void*, Instance> instances;
 std::unordered_map<void*, std::unique_ptr<Device>> devices;
 Device* state(const void* h) { auto it = devices.find(key(h)); return it == devices.end() ? nullptr : it->second.get(); }
 template<class T> T fn(Device* d, const char* name) { return reinterpret_cast<T>(d->gdpa(d->device, name)); }
+#if !defined(_WIN32)
+// Linux has no named shared resources: the host bridge asks this socket for an
+// export session and receives each eye's OPAQUE_FD memory over SCM_RIGHTS.
+void serve_client(int client) {
+    using namespace axrb::protocol;
+    for (;;) {
+        LinuxGpuShareRequest request{};
+        if (recv(client, &request, sizeof(request), 0) != static_cast<ssize_t>(sizeof(request)) ||
+            request.magic != kLinuxGpuShareMagic || request.version != kLinuxGpuShareVersion) break;
+        LinuxGpuShareReply reply{}; reply.session = request.session;
+        int fds[2]{-1, -1};
+        {
+            std::lock_guard lock(mutex);
+            for (auto& [deviceKey, device] : devices) {
+                auto found = device->exports.find(request.session);
+                if (found == device->exports.end() || !found->second) continue;
+                const auto& exported = *found->second;
+                reply.eye_count = exported.formats[1] ? 2u : 1u;
+                std::memcpy(reply.device_uuid, device->shared.deviceUUID, sizeof(reply.device_uuid));
+                std::memcpy(reply.driver_uuid, device->shared.driverUUID, sizeof(reply.driver_uuid));
+                reply.status = 1;
+                for (uint32_t eye = 0; eye < reply.eye_count; ++eye) {
+                    const auto& image = exported.eyes[eye];
+                    if (image.fd < 0) { reply.status = 0; break; }
+                    reply.eyes[eye] = {image.width, image.height, static_cast<uint32_t>(image.format), image.usage,
+                        image.size, image.memoryType, 1};
+                    fds[eye] = image.fd;
+                }
+                break;
+            }
+            // Send while holding the lock: a concurrent discard may close these descriptors.
+            char control[CMSG_SPACE(sizeof(fds))]{};
+            iovec iov{&reply, sizeof(reply)};
+            msghdr message{}; message.msg_iov = &iov; message.msg_iovlen = 1;
+            if (reply.status == 1) {
+                message.msg_control = control; message.msg_controllen = CMSG_SPACE(sizeof(int) * reply.eye_count);
+                cmsghdr* header = CMSG_FIRSTHDR(&message);
+                header->cmsg_level = SOL_SOCKET; header->cmsg_type = SCM_RIGHTS;
+                header->cmsg_len = CMSG_LEN(sizeof(int) * reply.eye_count);
+                std::memcpy(CMSG_DATA(header), fds, sizeof(int) * reply.eye_count);
+            } else reply.eye_count = 0;
+            if (sendmsg(client, &message, MSG_NOSIGNAL) != static_cast<ssize_t>(sizeof(reply))) break;
+        }
+    }
+    close(client);
+}
+void start_export_server() {
+    static bool started = false;
+    if (started) return;
+    started = true;
+    const auto path = axrb::protocol::linux_gpu_share_socket_path();
+    sockaddr_un address{}; address.sun_family = AF_UNIX;
+    if (path.size() >= sizeof(address.sun_path)) return;
+    std::memcpy(address.sun_path, path.c_str(), path.size() + 1);
+    int server = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    if (server < 0) return;
+    unlink(path.c_str());
+    if (bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0 || listen(server, 4) != 0) {
+        std::fprintf(stderr, "AXRB GPU layer: cannot serve %s\n", path.c_str()); close(server); return;
+    }
+    std::fprintf(stderr, "AXRB GPU layer: serving shared eye images on %s\n", path.c_str());
+    std::thread([server] {
+        for (;;) {
+            int client = accept4(server, nullptr, nullptr, SOCK_CLOEXEC);
+            if (client < 0) continue;
+            std::thread(serve_client, client).detach();
+        }
+    }).detach();
+}
+#endif
 }
 
 extern "C" {
-__declspec(dllexport) VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance, const char*);
-__declspec(dllexport) VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice, const char*);
+AXRB_LAYER_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance, const char*);
+AXRB_LAYER_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice, const char*);
 
 VKAPI_ATTR VkResult VKAPI_CALL createInstance(const VkInstanceCreateInfo* info, const VkAllocationCallbacks* alloc, VkInstance* out) {
     auto* chain = reinterpret_cast<VkLayerInstanceCreateInfo*>(const_cast<void*>(info->pNext));
@@ -66,14 +150,22 @@ VKAPI_ATTR VkResult VKAPI_CALL createDevice(VkPhysicalDevice physical, const VkD
     chain->u.pLayerInfo = chain->u.pLayerInfo->pNext;
     std::vector<const char*> extensions;
     for (uint32_t i = 0; i < info->enabledExtensionCount; ++i) extensions.push_back(info->ppEnabledExtensionNames[i]);
-    bool found = false; for (auto e : extensions) if (!std::strcmp(e, VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME)) found = true;
-    if (!found) extensions.push_back(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
+#if defined(_WIN32)
+    const char* const required = VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME;
+#else
+    const char* const required = VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME;
+#endif
+    bool found = false; for (auto e : extensions) if (!std::strcmp(e, required)) found = true;
+    if (!found) extensions.push_back(required);
     VkDeviceCreateInfo modified = *info; modified.enabledExtensionCount = static_cast<uint32_t>(extensions.size()); modified.ppEnabledExtensionNames = extensions.data();
     VkResult result = create(physical, &modified, alloc, out);
     if (result != VK_SUCCESS) return result;
     auto d = std::make_unique<Device>(); d->device = *out; d->setLoaderData = setLoaderData; d->instance = inst; d->gdpa = gdpa;
     bool ready = d->shared.initialize(inst.instance, physical, *out, inst.gipa, gdpa);
     std::fprintf(stderr, "AXRB GPU layer: device active, sharing=%d\n", ready);
+#if !defined(_WIN32)
+    if (ready) start_export_server();
+#endif
     devices[key(*out)] = std::move(d); return result;
 }
 VKAPI_ATTR void VKAPI_CALL destroyDevice(VkDevice device, const VkAllocationCallbacks* alloc) {
@@ -157,8 +249,12 @@ VKAPI_ATTR void VKAPI_CALL blitImage(VkCommandBuffer cmd, VkImage source, VkImag
         exported = std::make_unique<Export>(); exported->width = c.marker.width; exported->height = c.marker.height;
         for (uint32_t eye = 0; eye < eyeCount; ++eye) {
             exported->formats[eye] = c.marker.formats[eye];
+#if defined(_WIN32)
             wchar_t name[96]; swprintf_s(name, L"Local\\AXRB_GPU_%016llx_%u", c.marker.session, eye);
             if (!d->shared.create(exported->eyes[eye], c.marker.width, c.marker.height, static_cast<VkFormat>(c.marker.formats[eye]), name)) {
+#else
+            if (!d->shared.create(exported->eyes[eye], c.marker.width, c.marker.height, static_cast<VkFormat>(c.marker.formats[eye]))) {
+#endif
                 for (auto& image : exported->eyes) d->shared.destroy(image);
                 exported.reset(); c.eye = 2; original(); return;
             }
@@ -203,15 +299,15 @@ PFN_vkVoidFunction intercept(const char* name) {
     ENTRY("vkCmdUpdateBuffer", updateBuffer); ENTRY("vkCmdBlitImage", blitImage);
     return nullptr;
 }
-__declspec(dllexport) VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char* name) {
+AXRB_LAYER_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char* name) {
     if (auto result = intercept(name)) return result;
     std::lock_guard lock(mutex); auto it = instances.find(key(instance)); return it == instances.end() ? nullptr : it->second.gipa(instance, name);
 }
-__declspec(dllexport) VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char* name) {
+AXRB_LAYER_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char* name) {
     if (auto result = intercept(name)) return result;
     std::lock_guard lock(mutex); auto* d = state(device); return d ? d->gdpa(device, name) : nullptr;
 }
-VKAPI_ATTR VkResult VKAPI_CALL vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface* info) {
+AXRB_LAYER_ENTRY VKAPI_ATTR VkResult VKAPI_CALL vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface* info) {
     if (info->loaderLayerInterfaceVersion > 2) info->loaderLayerInterfaceVersion = 2;
     info->pfnGetInstanceProcAddr = vkGetInstanceProcAddr; info->pfnGetDeviceProcAddr = vkGetDeviceProcAddr;
     info->pfnGetPhysicalDeviceProcAddr = nullptr;
