@@ -653,6 +653,17 @@ private:
     uint32_t projectionWidth_ = 0, projectionHeight_ = 0;
     uint64_t submittedSequence_ = 0;
     std::atomic<uint32_t> frameSlack_{0};
+    // AXRB_LATENCY_PROBE=1: match each presented frame's render pose to the
+    // head poses this loop published, to estimate pose-to-photon latency.
+    struct PoseSample { std::chrono::steady_clock::time_point at{}; axrb::protocol::Pose hmd{}; };
+    const XrDuration poseLeadPeriods_ = [] {
+        const char* v = std::getenv("AXRB_POSE_LEAD_PERIODS");
+        return v && v[0] >= '0' && v[0] <= '3' && !v[1] ? XrDuration(v[0] - '0') : XrDuration(0);
+    }();
+    const bool latencyProbe_ = [] { const char* v = std::getenv("AXRB_LATENCY_PROBE"); return v && v[0] == '1'; }();
+    std::array<PoseSample, 128> poseHistory_{};
+    size_t poseHistoryNext_ = 0;
+    void probe_render_pose(const axrb::protocol::ImageProjection& projection);
     uint32_t frameSlackCounter_ = 0;
     FrameDeliveryCounter submittedGameFrames_;
     bool reportedProjectionSubmit_ = false, reportedUnsupportedLayer_ = false, reportedGpuImage_ = false;

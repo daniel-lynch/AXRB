@@ -80,6 +80,14 @@ axrb::protocol::PoseFrame OpenXrSession::make_frame(uint64_t sequence)
             shouldRender = frameState.shouldRender;
             frameDisplayTime = frameState.predictedDisplayTime;
             locateTime = frameState.predictedDisplayTime;
+#if !defined(_WIN32)
+            // A guest frame is presented two host frames after the poses it
+            // rendered were published (measured with AXRB_LATENCY_PROBE=1).
+            // Optionally predict that far ahead; the runtime still reprojects
+            // rotation to the actual display pose.
+            if (poseLeadPeriods_ && frameState.shouldRender)
+                locateTime += poseLeadPeriods_ * frameState.predictedDisplayPeriod;
+#endif
             if (frameState.shouldRender && axrb::protocol::valid_display_period(frameState.predictedDisplayPeriod)) {
                 frame.display_period_ns = static_cast<uint32_t>(frameState.predictedDisplayPeriod);
                 frameDisplayPeriod = frameState.predictedDisplayPeriod;
@@ -238,6 +246,10 @@ axrb::protocol::PoseFrame OpenXrSession::make_frame(uint64_t sequence)
 
     locate_controller_spaces(frame, locateTime, sequence);
     locate_hand_joints(frame, locateTime, sequence);
+#if !defined(_WIN32)
+    if (latencyProbe_ && (frame.hmd_flags & 3) == 3)
+        poseHistory_[poseHistoryNext_++ % poseHistory_.size()] = {std::chrono::steady_clock::now(), frame.hmd};
+#endif
     publish_pose(frame);
 
     if (beganFrame) {
@@ -263,6 +275,13 @@ axrb::protocol::PoseFrame OpenXrSession::make_frame(uint64_t sequence)
         endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         endInfo.layerCount = layerCount;
         endInfo.layers = layerCount > 0 ? layers.data() : nullptr;
+#if !defined(_WIN32)
+        if (latencyProbe_ && hasGameProjection) {
+            // The runtime's own share: submission to its predicted photons.
+            static axrb::protocol::PerfStats displayStats("host-submit-to-display");
+            if (const XrTime now = current_xr_time()) displayStats.record((frameDisplayTime - now) / 1e6);
+        }
+#endif
         {
             static axrb::protocol::PerfStats stats("host-end-frame");
             axrb::protocol::PerfScope scope(stats);

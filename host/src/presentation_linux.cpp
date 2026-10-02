@@ -251,6 +251,9 @@ bool OpenXrSession::update_projection_layers(XrTime, std::vector<const XrComposi
         const auto age = std::chrono::steady_clock::now() - frame.receivedAt;
         static axrb::protocol::PerfStats ageStats("host-selected-frame-age");
         ageStats.record(std::chrono::duration<double, std::milli>(age).count());
+        if (latencyProbe_ && !frame.gpu) probe_render_pose(frame.projection);
+        if (latencyProbe_ && frame.gpu)
+            for (const auto& part : frame.gpu->parts) if (part.projection.view_count == 2) { probe_render_pose(part.projection); break; }
         frameSlack_.store(encode_frame_slack(static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(age).count()), ++frameSlackCounter_));
     }
@@ -260,6 +263,29 @@ bool OpenXrSession::update_projection_layers(XrTime, std::vector<const XrComposi
         reportedProjectionSubmit_ = true;
     }
     return hasProjection;
+}
+
+void OpenXrSession::probe_render_pose(const axrb::protocol::ImageProjection& projection)
+{
+    if (projection.view_count != 2 || projection.is_view_space()) return;
+    // The render camera is the eye midpoint with the eyes' orientation.
+    const auto& l = projection.views[0].pose;
+    const auto& r = projection.views[1].pose;
+    const float x = (l.x + r.x) / 2, y = (l.y + r.y) / 2, z = (l.z + r.z) / 2;
+    double best = 1e9;
+    const PoseSample* match = nullptr;
+    for (const auto& sample : poseHistory_) {
+        if (sample.at == std::chrono::steady_clock::time_point{}) continue;
+        const auto& h = sample.hmd;
+        const double dot = std::fabs(double(h.qx) * l.qx + double(h.qy) * l.qy + double(h.qz) * l.qz + double(h.qw) * l.qw);
+        const double angle = 2 * std::acos((std::min)(1.0, dot));
+        const double distance = std::sqrt(double(h.x - x) * (h.x - x) + double(h.y - y) * (h.y - y) + double(h.z - z) * (h.z - z));
+        const double score = distance + 0.05 * angle;
+        if (score < best) { best = score; match = &sample; }
+    }
+    if (!match) return;
+    static axrb::protocol::PerfStats ageStats("host-pose-to-submit");
+    ageStats.record(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - match->at).count());
 }
 
 } // namespace axrb::host::detail
