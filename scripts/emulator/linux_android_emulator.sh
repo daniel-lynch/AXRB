@@ -123,6 +123,9 @@ start() {
     adbs reverse tcp:38490 tcp:38490
     adbs reverse tcp:38491 tcp:38491
     adbs shell setprop debug.axrb.gpu_share "$GPU_SHARING"
+    # Uncached coherent guest memory is not coherent with the GPU under KVM;
+    # the runtime layer allocates it from the cached type (coherent_memory_policy.h).
+    adbs shell setprop debug.axrb.coherent_memory 1
     echo "Ready: $SERIAL. Images use adb reverse :38491; native pose stream uses 10.0.2.2:38490."
 }
 

@@ -16,6 +16,7 @@
 #include "cached_buffer_policy.h"
 #include "guest_accel/guest_accel.h"
 #include "texture/astc_substitution.h"
+#include "coherent_memory_policy.h"
 
 namespace {
 constexpr const char* layerName="VK_LAYER_AXRB_runtime";
@@ -30,6 +31,7 @@ struct Device {
     PFN_vkUpdateDescriptorSets updateSets = nullptr;
     PFN_vkAllocateMemory allocate = nullptr;
     axrb::CachedBufferPolicy cachedBuffers;
+    axrb::CoherentMemoryPolicy coherent;
     // Set when the application enabled VK_KHR_external_memory_fd and only this
     // layer published it; the driver's own entry points otherwise.
     bool syntheticMemoryFd = false;
@@ -115,7 +117,7 @@ bool cachedBufferMemory(){
 }
 void filterBufferMemory(const Device& d,VkMemoryRequirements* requirements){
     const uint32_t before=requirements->memoryTypeBits;
-    requirements->memoryTypeBits=d.cachedBuffers.filter(before);
+    requirements->memoryTypeBits=d.coherent.filter(cachedBufferMemory()?d.cachedBuffers.filter(before):before);
     static std::atomic<unsigned> reports{0};
     if(before!=requirements->memoryTypeBits&&reports.fetch_add(1,std::memory_order_relaxed)<12)
         __android_log_print(ANDROID_LOG_INFO,"AXRB.CachedBuffers","requirements size=%llu types=%x -> %x",
@@ -174,6 +176,16 @@ VkResult allocateMemory(Device s,VkDevice h,const VkMemoryAllocateInfo* info,con
     if(cachedBufferMemory()&&info){static std::atomic<unsigned> reports{0};
         if(reports.fetch_add(1,std::memory_order_relaxed)<32)__android_log_print(ANDROID_LOG_INFO,
             "AXRB.CachedBuffers","allocate type=%u size=%llu",info->memoryTypeIndex,(unsigned long long)info->allocationSize);}
+    // Uncached coherent system memory is not coherent under KVM (coherent_memory_policy.h).
+    VkMemoryAllocateInfo remapped;
+    if(info&&s.coherent.allocation_type(info->memoryTypeIndex)!=info->memoryTypeIndex){
+        remapped=*info;remapped.memoryTypeIndex=s.coherent.allocation_type(info->memoryTypeIndex);
+        static std::atomic<unsigned> reports{0};
+        if(reports.fetch_add(1,std::memory_order_relaxed)<4)__android_log_print(ANDROID_LOG_INFO,"AXRB.CoherentMemory",
+            "allocation of type %u made from type %u (size %llu)",info->memoryTypeIndex,remapped.memoryTypeIndex,
+            (unsigned long long)remapped.allocationSize);
+        info=&remapped;
+    }
     if(!s.syntheticMemoryFd||!info)return s.allocate(h,info,alloc,out);
     auto size=[](VkStructureType type)->size_t{
         switch(type){
@@ -285,6 +297,14 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physical,const Vk
             __android_log_print(ANDROID_LOG_INFO,"AXRB.CachedBuffers","enabled cached=%x uncached=%x",
                 state.cachedBuffers.cached,state.cachedBuffers.uncached);
         }
+        if(axrb::coherent_memory_enabled()){
+            VkPhysicalDeviceMemoryProperties props{};
+            function<PFN_vkGetPhysicalDeviceMemoryProperties>(s,"vkGetPhysicalDeviceMemoryProperties")(physical,&props);
+            state.coherent=axrb::CoherentMemoryPolicy::from(props);
+            for(uint32_t i=0;i<VK_MAX_MEMORY_TYPES;++i)if(state.coherent.sources>>i&1)
+                __android_log_print(ANDROID_LOG_INFO,"AXRB.CoherentMemory","memory type %u (flags 0x%x) allocated as type %u (flags 0x%x)",
+                    i,props.memoryTypes[i].propertyFlags,state.coherent.target[i],props.memoryTypes[state.coherent.target[i]].propertyFlags);
+        }
         state.createTemplate=function<PFN_vkCreateDescriptorUpdateTemplate>(state,"vkCreateDescriptorUpdateTemplate");
         if(!state.createTemplate)state.createTemplate=function<PFN_vkCreateDescriptorUpdateTemplate>(state,"vkCreateDescriptorUpdateTemplateKHR");
         state.destroyTemplate=function<PFN_vkDestroyDescriptorUpdateTemplate>(state,"vkDestroyDescriptorUpdateTemplate");
@@ -334,6 +354,19 @@ VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements2(VkDevice h,const VkBuf
 }
 VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements2KHR(VkDevice h,const VkBufferMemoryRequirementsInfo2* info,VkMemoryRequirements2* out){
     vkGetBufferMemoryRequirements2(h,info,out);
+}
+// Images only lose a remapped memory type they could not be bound to (coherent_memory_policy.h).
+VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements(VkDevice h,VkImage image,VkMemoryRequirements* out){
+    auto s=device(h);function<PFN_vkGetImageMemoryRequirements>(s,"vkGetImageMemoryRequirements")(h,image,out);
+    out->memoryTypeBits=s.coherent.filter(out->memoryTypeBits);
+}
+VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements2(VkDevice h,const VkImageMemoryRequirementsInfo2* info,VkMemoryRequirements2* out){
+    auto s=device(h);auto next=function<PFN_vkGetImageMemoryRequirements2>(s,"vkGetImageMemoryRequirements2");
+    if(!next)next=function<PFN_vkGetImageMemoryRequirements2>(s,"vkGetImageMemoryRequirements2KHR");
+    next(h,info,out);out->memoryRequirements.memoryTypeBits=s.coherent.filter(out->memoryRequirements.memoryTypeBits);
+}
+VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements2KHR(VkDevice h,const VkImageMemoryRequirementsInfo2* info,VkMemoryRequirements2* out){
+    vkGetImageMemoryRequirements2(h,info,out);
 }
 VKAPI_ATTR void VKAPI_CALL vkDestroyDevice(VkDevice h,const VkAllocationCallbacks* alloc){
     auto s=device(h);if(s.astc)axrb::texture::AstcSubstitution::instance().remove_device(h);{std::lock_guard lock(mutex);devices.erase(key(h));for(auto it=templates.begin();it!=templates.end();)if(it->first.first==h)it=templates.erase(it);else ++it;}
@@ -514,8 +547,11 @@ PFN_vkVoidFunction intercept(const char* name){
     ENTRY(vkEnumerateDeviceExtensionProperties);
     ENTRY(vkSetDebugUtilsObjectNameEXT);
     ENTRY(vkGetMemoryFdKHR);ENTRY(vkGetMemoryFdPropertiesKHR);ENTRY(vkAllocateMemory);
-    if(cachedBufferMemory()){
+    if(cachedBufferMemory()||axrb::coherent_memory_enabled()){
         ENTRY(vkGetBufferMemoryRequirements);ENTRY(vkGetBufferMemoryRequirements2);ENTRY(vkGetBufferMemoryRequirements2KHR);
+    }
+    if(axrb::coherent_memory_enabled()){
+        ENTRY(vkGetImageMemoryRequirements);ENTRY(vkGetImageMemoryRequirements2);ENTRY(vkGetImageMemoryRequirements2KHR);
     }
     ENTRY(vkCreateDescriptorUpdateTemplate);ENTRY(vkDestroyDescriptorUpdateTemplate);ENTRY(vkUpdateDescriptorSetWithTemplate);
     ENTRY(vkCreateDescriptorUpdateTemplateKHR);ENTRY(vkDestroyDescriptorUpdateTemplateKHR);ENTRY(vkUpdateDescriptorSetWithTemplateKHR);

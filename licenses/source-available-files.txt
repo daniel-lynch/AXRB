@@ -49,6 +49,7 @@ runtime/src/spaces.cpp
 runtime/src/vulkan_backend.cpp
 runtime/vulkan/android_vulkan_layer.cpp
 runtime/vulkan/cached_buffer_policy.h
+runtime/vulkan/coherent_memory_policy.h
 runtime/vulkan/guest_accel/guest_accel.h
 runtime/vulkan/guest_accel/unity_skinning.h
 runtime/vulkan/texture/astc_substitution.h
@@ -69,6 +70,7 @@ scripts/run/run_windows_game.ps1
 tests/CMakeLists.txt
 tests/android/astc_fetch_spirv.h
 tests/android/vulkan_astc_bc7_e2e.cpp
+tests/android/vulkan_etc2_android.cpp
 tests/native/cached_buffer_policy_smoke.cpp
 tests/native/frame_history_smoke.cpp
 tests/native/frame_wait_budget_smoke.cpp
@@ -82,3 +84,4 @@ tests/native/space_velocity_smoke.cpp
 tests/native/texture_transcode_test.cpp
 tests/native/unity_skinning_equivalence.cpp
 tests/native/windows_gpu_transport_smoke.cpp
+tools/compare_etc2.py

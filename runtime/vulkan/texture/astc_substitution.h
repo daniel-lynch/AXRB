@@ -120,7 +120,9 @@ public:
         auto state = device_state(device);
         int bw = 0, bh = 0;
         bool srgb = false;
-        if (!state || !info || !astc::block_size(uint32_t(info->format), &bw, &bh, &srgb) || !substitutable(*info))
+        const bool isAstc = info && astc::block_size(uint32_t(info->format), &bw, &bh, &srgb);
+        if (state && isAstc && !substitutable(*info)) not_substituted(*info);
+        if (!state || !isAstc || !substitutable(*info))
             return state ? state->calls.createImage(device, info, allocator, out) : VK_ERROR_INITIALIZATION_FAILED;
         VkImageCreateInfo bc7 = *info;
         bc7.format = bc7_format(srgb);
@@ -543,6 +545,22 @@ private:
         return info.imageType == VK_IMAGE_TYPE_2D && info.tiling == VK_IMAGE_TILING_OPTIMAL && !(info.flags & reinterpreting) &&
                !(info.usage & ~plain) && info.pNext == nullptr;
     }
+    // An ASTC image left to the emulator's own ASTC decoder: says why, once per
+    // distinct combination, so a run shows whether the substitution is in play.
+    void not_substituted(const VkImageCreateInfo& info) {
+        std::lock_guard lock(warnings_);
+        const uint64_t key = uint64_t(info.flags) << 32 ^ uint64_t(info.usage) << 8 ^ uint64_t(info.imageType) << 4 ^
+                             uint64_t(info.tiling) ^ (info.pNext ? 1ull << 63 : 0);
+        for (uint64_t seen : passKeys_)
+            if (seen == key) return;
+        if (passKeys_.size() >= 16) return;
+        passKeys_.push_back(key);
+        __android_log_print(ANDROID_LOG_WARN, tag,
+                            "ASTC image format=%d %ux%u mips=%u left as ASTC (emulator decodes it): flags=0x%x usage=0x%x type=%d "
+                            "tiling=%d pNext=%s",
+                            int(info.format), info.extent.width, info.extent.height, info.mipLevels, info.flags, info.usage,
+                            int(info.imageType), int(info.tiling), info.pNext ? "yes" : "no");
+    }
     static uint64_t emulated_bytes(const VkImageCreateInfo& info, int bw, int bh) {
         uint64_t bytes = 0;
         for (uint32_t mip = 0; mip < info.mipLevels; ++mip) {
@@ -698,6 +716,7 @@ private:
     Stats stats_;
     std::mutex warnings_;
     int warned_ = 0;
+    std::vector<uint64_t> passKeys_;
 };
 
 inline AstcSubstitution& astc_images() { return AstcSubstitution::instance(); }
