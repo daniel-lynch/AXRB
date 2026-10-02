@@ -8,29 +8,57 @@ with GPU-shared eye images; see Frame rate. Rig: Fedora 44, RTX 3080 Ti (NVIDIA 
 
 ## Reproduce
 
+One-time setup (AVD `axrb-managed-api36`, runtime APK, the title's APK):
+
 ```sh
-scripts/emulator/linux_android_emulator.sh setup      # AVD axrb-managed-api36
-ANDROID_ABI=arm64-v8a runtime/apk/build_apk.sh        # needs a JDK with javac
-cmake -S . -B out/linux -G Ninja -DAXRB_BUILD_ANDROID_RUNTIME=OFF -DAXRB_BUILD_TESTS=OFF -DCMAKE_BUILD_TYPE=Release
-cmake --build out/linux
-cmake -S host/gpu -B out/linux-gpu -G Ninja -DCMAKE_BUILD_TYPE=Release   # emulator-side layer
-cmake --build out/linux-gpu
-AXRB_GPU_SHARING=1 scripts/emulator/linux_android_emulator.sh start      # KVM + -gpu host, XR features, layer
-scripts/emulator/linux_android_emulator.sh install out/android/runtime/axrb-openxr-runtime-debug.apk
-sleep infinity | SIMULATED_ENABLE=1 XRT_COMPOSITOR_FORCE_XCB=1 XRT_COMPOSITOR_DEFAULT_FRAMERATE=90 monado-service &   # stdin must not be /dev/null
-XR_RUNTIME_JSON=/usr/share/openxr/1/openxr_monado.json out/linux/bin/axrb-host-bridge --serve-openxr 38490 0 Game &
-python3 scripts/emulator/android_runtime_policy.py --sdk ~/Android/Sdk --serial emulator-5584 --package <pkg>
-adb -s emulator-5584 shell setprop debug.axrb.cached_buffer_memory 0         # see below
-adb -s emulator-5584 shell am start -n <pkg>/<activity>
+scripts/emulator/linux_android_emulator.sh setup
+ANDROID_ABI=arm64-v8a runtime/apk/build_apk.sh        # needs a JDK (Fedora: java-25-openjdk-devel)
+AXRB_GPU_SHARING=1 scripts/emulator/linux_android_emulator.sh start
+scripts/emulator/linux_android_emulator.sh install out/android/runtime/axrb-openxr-runtime-debug.apk <title.apk>
 ```
 
-(`ANDROID_ADB_SERVER_PORT=5038` throughout, as on Windows.) Neither build
-needs a Vulkan SDK or a shader compiler: the Vulkan headers come from the NDK
-and the host loads `libvulkan.so.1` at run time. Without `AXRB_GPU_SHARING=1`
-(or with `debug.axrb.gpu_share 0`) frames travel as pixels, see below.
-`AXRB_HEADLESS=1` keeps the older pose-only host (XR_MND_headless), which a
-runtime without XR_KHR_vulkan_enable2 also gets. `start` sets
-`debug.axrb.coherent_memory 1`, `debug.axrb.gpu_share` and
+Then one command per session:
+
+```sh
+# Headset: start WiVRn and connect the Quest first.
+scripts/run/run_linux_game.sh --package com.Armature.VR4 \
+    --activity com.epicgames.ue4.GameActivity --title "Resident Evil 4" --runtime wivrn
+# Desktop: a local Monado with a simulated HMD in a window at 90 Hz.
+scripts/run/run_linux_game.sh --package com.Armature.VR4 --runtime monado
+```
+
+`run_linux_game.sh` checks `/dev/kvm`, the SDK, the AVD, the runtime
+(WiVRn: the flatpak's manifest via `flatpak info --show-location`, the
+server's IPC socket and `HeadsetConnected` on its D-Bus interface; it does
+not start WiVRn), builds the bridge and the emulator layer when out of date,
+starts the emulator cold with `AXRB_GPU_SHARING=1` unless one is running,
+applies the runtime policy and `debug.axrb.cached_buffer_memory=0`, starts
+`monado-service` only if `--runtime monado` and none is running, then the
+bridge and the title (launcher activity resolved in the guest when
+`--activity` is omitted). Ctrl-C, or the title exiting, stops the bridge, the
+title, a Monado it started and an emulator it started (`--keep-emulator`
+leaves that running). Logs, including the guest's `AXRB.Perf` lines, go to
+`~/.local/state/axrb/logs/run-<time>/`. `--rebuild-runtime-apk` rebuilds and
+reinstalls the runtime for the title's ABI; `--prop KEY=VALUE` sets guest
+properties; the bridge's diagnostic variables (`AXRB_POSE_LEAD_PERIODS`,
+`AXRB_LATENCY_PROBE`, `AXRB_EYE_EXTENT`, ...) pass through; see `--help`.
+The system `active_runtime.json` is never touched (`XR_RUNTIME_JSON` is set
+for the bridge only).
+
+Two things the script handles that the manual steps get wrong easily: the
+runtime policy restarts adbd as root, which drops the `adb reverse`
+forwards, so they are re-applied after it (without them the guest logs
+"GPU consumer unavailable" and the bridge presents nothing); and the
+emulator runs with `-no-snapshot` (`AXRB_NO_SNAPSHOT=1`), because a
+quickboot snapshot saved after a GPU-sharing session crashed qemu
+(`AdbVsockPipe`) seconds after loading.
+
+Neither build needs a Vulkan SDK or a shader compiler: the Vulkan headers
+come from the NDK and the host loads `libvulkan.so.1` at run time. Without
+`AXRB_GPU_SHARING=1` (or with `debug.axrb.gpu_share 0`) frames travel as
+pixels, see below. `AXRB_HEADLESS=1` keeps the older pose-only host
+(XR_MND_headless), which a runtime without XR_KHR_vulkan_enable2 also gets.
+`start` sets `debug.axrb.coherent_memory 1`, `debug.axrb.gpu_share` and
 `debug.axrb.defer_gpu_ack` from `AXRB_GPU_SHARING`.
 
 ## Frame rate (2026-10-02)
@@ -104,13 +132,11 @@ Resolution is not the limit on this GPU: the title screen holds 90 frames/s
 at 1440x1584 and 1832x1920 per eye (`AXRB_EYE_EXTENT`; RE4VR renders at 1.2x
 and blits down), GPU 16 % busy. Gameplay has not been measured.
 
-Headset through WiVRn (not yet tried): start the WiVRn server and connect
-the headset, then start the bridge with `XR_RUNTIME_JSON` pointing at WiVRn's
-runtime manifest instead of Monado's (flatpak user install:
-`~/.local/share/flatpak/app/io.github.wivrn.wivrn/current/active/files/share/openxr/1/openxr_wivrn.json`);
-everything else is the same. The bridge refuses OPAQUE_FD sharing
-if WiVRn's Vulkan device is not the GPU the emulator renders on (logged);
-the eye extent and refresh rate then come from WiVRn.
+Headset through WiVRn (not yet tried): `run_linux_game.sh --runtime wivrn`
+with the WiVRn server running and the headset connected; everything else is
+the same. The bridge refuses OPAQUE_FD sharing if WiVRn's Vulkan device is
+not the GPU the emulator renders on (logged); the eye extent and refresh
+rate then come from WiVRn.
 
 Not done on Linux: precomposition when the runtime's layer limit is
 exceeded, the per-part (non-batch) mixed GPU messages, the desktop mirror
@@ -161,3 +187,23 @@ left-eye frames as PPM, as on Windows.
 - Without GPU sharing, every frame is read back and sent as RGBA over
   `adb reverse`. At 2×1024² that caps the stream at about 25-28 fps (see Frame
   rate). With no consumer attached, the game renders 90 fps.
+
+## Appendix: the manual sequence
+
+What `run_linux_game.sh` does, by hand (`ANDROID_ADB_SERVER_PORT=5038`
+throughout, as on Windows):
+
+```sh
+cmake -S . -B out/linux -G Ninja -DAXRB_BUILD_ANDROID_RUNTIME=OFF -DAXRB_BUILD_TESTS=OFF -DCMAKE_BUILD_TYPE=Release && cmake --build out/linux
+cmake -S host/gpu -B out/linux-gpu -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build out/linux-gpu
+AXRB_GPU_SHARING=1 AXRB_NO_SNAPSHOT=1 scripts/emulator/linux_android_emulator.sh start
+python3 scripts/emulator/android_runtime_policy.py --sdk ~/Android/Sdk --serial emulator-5584 --package <pkg>
+adb -s emulator-5584 reverse tcp:38490 tcp:38490; adb -s emulator-5584 reverse tcp:38491 tcp:38491
+adb -s emulator-5584 shell setprop debug.axrb.cached_buffer_memory 0
+sleep infinity | SIMULATED_ENABLE=1 XRT_COMPOSITOR_FORCE_XCB=1 XRT_COMPOSITOR_DEFAULT_FRAMERATE=90 monado-service &   # Monado only; stdin must not be /dev/null
+XR_RUNTIME_JSON=<runtime manifest> out/linux/bin/axrb-host-bridge --serve-openxr 38490 0 "<title>" &
+adb -s emulator-5584 shell am start -n <pkg>/<activity>
+```
+
+Runtime manifests: Monado `/usr/share/openxr/1/openxr_monado.json`; WiVRn
+`$(flatpak info --show-location io.github.wivrn.wivrn)/files/share/openxr/1/openxr_wivrn.json`.

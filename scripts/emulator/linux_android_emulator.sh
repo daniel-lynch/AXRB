@@ -116,6 +116,10 @@ start() {
         -memory "$MEMORY_MB" -cores "$CORES" -writable-system)
     [[ "${AXRB_SHOW_WINDOW:-0}" == 1 ]] || args+=(-no-window)
     [[ "${AXRB_COLD_BOOT:-0}" == 1 ]] && args+=(-no-snapshot-load)
+    # Neither load nor save a quickboot snapshot. A snapshot saved by
+    # `emu kill` after a GPU-sharing session crashed qemu (AdbVsockPipe) a few
+    # seconds after it was loaded.
+    [[ "${AXRB_NO_SNAPSHOT:-0}" == 1 ]] && args+=(-no-snapshot)
     local layer_env=()
     if [[ "$GPU_SHARING" == 1 ]]; then
         [[ -f "$GPU_LAYER_DIR/axrb_gpu_layer.json" ]] || { echo "Build host/gpu first: cmake -S host/gpu -B out/linux-gpu && cmake --build out/linux-gpu" >&2; exit 1; }
