@@ -17,6 +17,14 @@ APKSIGNER="$BUILD_TOOLS/apksigner"
 ANDROID_JAR="$SDK/platforms/$ANDROID_PLATFORM/android.jar"
 TOOLCHAIN="$NDK/build/cmake/android.toolchain.cmake"
 
+# javac and jar come from a full JDK, not the runtime-only package.
+for tool in javac jar keytool; do
+    if ! command -v "$tool" >/dev/null; then
+        echo "Missing $tool: install a JDK (Fedora: sudo dnf install java-25-openjdk-devel)" >&2
+        exit 1
+    fi
+done
+
 for required in "$AAPT2" "$D8" "$ZIPALIGN" "$APKSIGNER" "$ANDROID_JAR" "$TOOLCHAIN"; do
     if [[ ! -e "$required" ]]; then
         echo "Missing required Android tool: $required" >&2
