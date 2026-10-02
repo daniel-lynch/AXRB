@@ -81,7 +81,11 @@ struct PoseFrame {
     uint32_t reserved_v5 = 0;
     ViewFov view_fov[2]; // v6: actual host per-eye optical FOV, in radians.
     uint32_t view_fov_valid = 0;
-    uint32_t reserved_v6 = 0;
+    // Optional reserved-word extension, zero when unknown (older hosts):
+    // how long the host held the newest guest frame before presenting it.
+    // Bits 0-23: microseconds + 1; bits 24-31: sample counter. A duration on
+    // the host clock only; the guest uses it to phase-lock its frame pacing.
+    uint32_t frame_slack = 0;
     SpaceVelocity hmd_velocity; // v7, preserves the entire 2448-byte v6 prefix.
     SpaceVelocity grip_velocity[2];
     SpaceVelocity aim_velocity[2];
@@ -104,6 +108,16 @@ inline bool has_valid_view_fovs(const PoseFrame& frame) {
 
 inline bool valid_render_extent(uint32_t width, uint32_t height) {
     return width && height && width <= kMaxEyeDimension && height <= kMaxEyeDimension;
+}
+
+inline uint32_t encode_frame_slack(uint64_t microseconds, uint32_t counter) {
+    return ((counter & 0xffu) << 24) | static_cast<uint32_t>(microseconds < 0xfffffeu ? microseconds + 1 : 0xffffffu);
+}
+inline bool decode_frame_slack(uint32_t field, uint32_t* microseconds, uint32_t* counter) {
+    if (!(field & 0xffffffu)) return false;
+    *microseconds = (field & 0xffffffu) - 1;
+    *counter = field >> 24;
+    return true;
 }
 
 inline bool valid_display_period(uint64_t period) {

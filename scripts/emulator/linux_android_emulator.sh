@@ -132,6 +132,9 @@ start() {
     adbs reverse tcp:38490 tcp:38490
     adbs reverse tcp:38491 tcp:38491
     adbs shell setprop debug.axrb.gpu_share "$GPU_SHARING"
+    # The Linux host copies shared images before it acknowledges them, so the
+    # guest can defer that wait until it would reuse them (about 1 ms per frame).
+    adbs shell setprop debug.axrb.defer_gpu_ack "$GPU_SHARING"
     # Uncached coherent guest memory is not coherent with the GPU under KVM;
     # the runtime layer allocates it from the cached type (coherent_memory_policy.h).
     adbs shell setprop debug.axrb.coherent_memory 1

@@ -1,5 +1,6 @@
 #include "runtime_internal.h"
 #include "frame_wait_budget.h"
+#include <cstdlib>
 
 namespace axrb::runtime::detail {
 
@@ -44,6 +45,43 @@ void pacing_spin_hint() {
     std::this_thread::yield();
 #endif
 }
+
+// Phase lock: a host that reports how long it held our newest frame before
+// presenting it (PoseFrame::frame_slack) lets us shift the frame schedule so
+// frames land a little before the host samples them, instead of drifting
+// against its display clock (periodic repeats and drops when both run at the
+// same rate). Small bounded steps; disabled by debug.axrb.phase_lock=0.
+struct PhaseLock {
+    bool enabled = [] {
+#if defined(__ANDROID__)
+        char value[PROP_VALUE_MAX]{};
+        __system_property_get("debug.axrb.phase_lock", value);
+        return std::strcmp(value, "0") != 0;
+#else
+        return true;
+#endif
+    }();
+    int64_t targetNs = [] {
+#if defined(__ANDROID__)
+        char value[PROP_VALUE_MAX]{};
+        __system_property_get("debug.axrb.phase_target_us", value);
+        const long parsed = std::strtol(value, nullptr, 10);
+        if (parsed > 0 && parsed < 20000) return static_cast<int64_t>(parsed) * 1000;
+#endif
+        return int64_t{4'000'000};
+    }();
+    uint32_t lastCounter = UINT32_MAX;
+    // Returns the schedule shift to apply now (positive: start later).
+    int64_t correction(const axrb::protocol::PoseFrame& frame, int64_t period) {
+        uint32_t slackUs = 0, counter = 0;
+        if (!enabled || !axrb::protocol::decode_frame_slack(frame.frame_slack, &slackUs, &counter) ||
+            counter == lastCounter) return 0;
+        lastCounter = counter;
+        const int64_t error = static_cast<int64_t>(slackUs) * 1000 - targetNs;
+        const int64_t limit = period / 32;
+        return std::clamp<int64_t>(error / 8, -limit, limit);
+    }
+};
 
 bool pacing_trace_enabled() {
     static const bool enabled = [] {
@@ -135,6 +173,13 @@ XrResult XRAPI_CALL xrWaitFrame_impl(
     const uint32_t spinUs = pacing_spin_us();
     const uint32_t catchupPeriods = pacing_catchup_periods();
     XrTime now = monotonic_time_ns();
+    static PhaseLock phaseLock;
+    if (g_nextFrameStart) {
+        const int64_t shift = phaseLock.correction(pose_client().latest_pose_frame(), period);
+        g_nextFrameStart += shift;
+        static axrb::protocol::PerfStats shiftStats("phase-lock-shift");
+        if (shift) shiftStats.record(shift / 1000000.0);
+    }
     const XrTime entered = now, oldDeadline = g_nextFrameStart;
     const bool shouldResetBefore = pacing_reset_due(now, g_nextFrameStart, period, catchupPeriods);
     const bool resetBefore = g_nextFrameStart != 0 && shouldResetBefore;

@@ -53,6 +53,7 @@ axrb::protocol::PoseFrame OpenXrSession::make_frame(uint64_t sequence)
     if (vulkanPresentation_) {
         frame.render_width = projectionWidth_;
         frame.render_height = projectionHeight_;
+        frame.frame_slack = frameSlack_.load();
     }
 #endif
 

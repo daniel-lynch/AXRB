@@ -652,6 +652,8 @@ private:
     int64_t projectionFormat_ = 0;
     uint32_t projectionWidth_ = 0, projectionHeight_ = 0;
     uint64_t submittedSequence_ = 0;
+    std::atomic<uint32_t> frameSlack_{0};
+    uint32_t frameSlackCounter_ = 0;
     FrameDeliveryCounter submittedGameFrames_;
     bool reportedProjectionSubmit_ = false, reportedUnsupportedLayer_ = false, reportedGpuImage_ = false;
 #endif

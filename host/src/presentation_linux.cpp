@@ -153,10 +153,11 @@ bool OpenXrSession::update_projection_layers(XrTime, std::vector<const XrComposi
             // Opt-in diagnostics, as on Windows: four left-eye captures of the
             // first layer, five seconds apart, after loading.
             static const std::string capturePrefix = [] { const char* p = std::getenv("AXRB_CAPTURE_PREFIX"); return p ? std::string(p) : std::string(); }();
+            static const uint64_t captureAfter = [] { const char* p = std::getenv("AXRB_CAPTURE_AFTER"); return p ? std::strtoull(p, nullptr, 10) : 2000ull; }();
             static unsigned captured = 0;
             static auto previousCapture = std::chrono::steady_clock::now();
             std::string capturePath;
-            if (!capturePrefix.empty() && i == 0 && captured < 4 && header.sequence >= 2000 &&
+            if (!capturePrefix.empty() && i == 0 && captured < 4 && header.sequence >= captureAfter &&
                 std::chrono::steady_clock::now() - previousCapture >= std::chrono::seconds(5)) {
                 previousCapture = std::chrono::steady_clock::now();
                 capturePath = capturePrefix + "-" + std::to_string(captured++) + "-" + std::to_string(header.sequence) + ".ppm";
@@ -243,6 +244,16 @@ bool OpenXrSession::update_projection_layers(XrTime, std::vector<const XrComposi
         }
     }
     submittedSequence_ = header.sequence;
+    if (submittedGameFrames_.lastSequence != header.sequence) {
+        // Reception to submission of a newly presented frame (host clock only).
+        // Fed back through the pose stream, it lets the guest phase-lock its
+        // frame pacing to this loop instead of drifting against it.
+        const auto age = std::chrono::steady_clock::now() - frame.receivedAt;
+        static axrb::protocol::PerfStats ageStats("host-selected-frame-age");
+        ageStats.record(std::chrono::duration<double, std::milli>(age).count());
+        frameSlack_.store(encode_frame_slack(static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(age).count()), ++frameSlackCounter_));
+    }
     if (!reportedProjectionSubmit_ && !layers.empty()) {
         std::fprintf(stderr, "AXRB OpenXR: submitting %zu %s layer(s) %ux%u to the runtime\n",
             layers.size(), frame.gpu ? "shared-GPU" : "pixel-transfer", header.width, header.height);
