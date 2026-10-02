@@ -12,7 +12,7 @@ One-time setup (AVD `axrb-managed-api36`, runtime APK, the title's APK):
 
 ```sh
 scripts/emulator/linux_android_emulator.sh setup
-ANDROID_ABI=arm64-v8a runtime/apk/build_apk.sh        # needs a JDK (Fedora: java-25-openjdk-devel)
+ANDROID_ABI=arm64-v8a runtime/apk/build_apk.sh        # needs a JDK; built with OpenJDK 25 (Fedora: java-25-openjdk-devel)
 AXRB_GPU_SHARING=1 scripts/emulator/linux_android_emulator.sh start
 scripts/emulator/linux_android_emulator.sh install out/android/runtime/axrb-openxr-runtime-debug.apk <title.apk>
 ```

@@ -56,6 +56,7 @@ mkdir -p "$BUILD_DIR/compiled-res" "$BUILD_DIR/gen" "$BUILD_DIR/classes" "$BUILD
 javac \
     -source 8 \
     -target 8 \
+    -Xlint:-options \
     -bootclasspath "$ANDROID_JAR" \
     -d "$BUILD_DIR/classes" \
     $(find "$BUILD_DIR/gen" "$APP_DIR/src" -name '*.java' -print)
